@@ -1,0 +1,510 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Entrenador de Lectura Rápida (Tema Sepia)</title>
+    <!-- Carga de Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    
+    <!-- Carga de PDF.js (Mozilla) para la extracción de texto de PDF -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/2.16.105/pdf.js"></script>
+
+    <style>
+        /* Estilos base para el tema Sepia (Papel de Libro) */
+        body {
+            background-color: #fcf8e8; /* Fondo muy claro, crema suave */
+        }
+        
+        /* Contenedor principal del lector (simulando la página del libro) */
+        .sepia-container {
+            background-color: #f0e9d9; /* Tono de papel un poco más oscuro y cálido */
+            color: #333333; /* Texto oscuro, casi negro o marrón */
+        }
+
+        /* Estilos personalizados para el contenedor del texto */
+        #text-display-container {
+            position: relative;
+            overflow-y: auto;
+            scroll-behavior: smooth;
+            height: 70vh;
+            border: 2px solid #991b1b; /* Borde rojo oscuro/maroon */
+            user-select: none;
+            background-color: #f7f3e6; /* Fondo de lectura más claro para el contraste */
+            color: #2b2b2b; /* Color de texto muy oscuro */
+        }
+        /* La línea guía de lectura (destaca en rojo vivo sobre el sepia) */
+        #reading-guide-line {
+            position: sticky; 
+            top: 50%;
+            left: 0;
+            right: 0;
+            height: 2px;
+            background-color: #b91c1c; /* Rojo oscuro de alto contraste */
+            z-index: 10;
+            transform: translateY(-50%);
+            pointer-events: none;
+            box-shadow: 0 0 10px rgba(185, 28, 28, 0.5);
+        }
+        /* Estilo para el contenido de texto */
+        #text-content {
+            padding: 1rem;
+            line-height: 1.6;
+            padding-top: calc(70vh / 2);
+            padding-bottom: calc(70vh / 2);
+            min-height: 100%;
+        }
+        /* Estilo para el modal */
+        #modal-overlay {
+            background-color: rgba(0, 0, 0, 0.5);
+        }
+        /* Modal Content - Mantener la coherencia del tema */
+        #modal-overlay > div {
+             background-color: #f7f3e6; /* Fondo de modal sepia */
+        }
+        /* Estilo para el indicador de carga */
+        .spinner {
+            border: 4px solid rgba(0, 0, 0, 0.1);
+            border-radius: 50%;
+            border-top: 4px solid #b91c1c; /* Spinner color marrón */
+            width: 30px;
+            height: 30px;
+            animation: spin 1s linear infinite;
+        }
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+    </style>
+    <script>
+        // Configuración de PDF.js Worker. Es CRÍTICO para que funcione la librería.
+        if (typeof pdfjsLib !== 'undefined') {
+            pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/2.16.105/pdf.worker.js';
+        }
+
+        // Configuración de Firebase y Firestore (aunque usaremos localStorage, se mantiene la estructura para referencia)
+        const __app_id = 'speed-reader-app';
+        
+        // Variables globales
+        let intervalId = null;
+        let readingSpeedWPM = 250; // Velocidad inicial en Palabras Por Minuto (WPM)
+        
+        // Factor de calibración empírico para el WPM. 
+        const SCROLL_RATE_PER_WPM = 0.01; 
+        const FIXED_INTERVAL_MS = 33; // Usado a 33ms (aprox. 30 FPS) para un movimiento de scroll más fluido.
+        
+        // --- UTILIDADES ---
+
+        /**
+         * Calcula la distancia de scroll necesaria para mantener la WPM deseada.
+         */
+        function calculateScrollDistance() {
+            return readingSpeedWPM * SCROLL_RATE_PER_WPM;
+        }
+
+        /**
+         * Muestra un mensaje emergente personalizado (modal).
+         */
+        function showMessage(title, text) {
+            document.getElementById('modal-title').textContent = title;
+            document.getElementById('modal-text').textContent = text;
+            // Asegura que el texto del modal sea oscuro en este tema
+            document.getElementById('modal-text').classList.add('text-gray-700');
+            document.getElementById('modal-overlay').classList.remove('hidden');
+        }
+
+        /**
+         * Muestra/oculta el indicador de carga.
+         */
+        function showLoading(isLoading, message = 'Cargando...') {
+            const loadingOverlay = document.getElementById('loading-overlay');
+            if (isLoading) {
+                document.getElementById('loading-message').textContent = message;
+                // Asegura el texto blanco sobre el fondo oscuro del overlay
+                document.getElementById('loading-message').classList.remove('text-white');
+                document.getElementById('loading-message').classList.add('text-gray-100');
+                loadingOverlay.classList.remove('hidden');
+            } else {
+                loadingOverlay.classList.add('hidden');
+            }
+        }
+
+        // --- FUNCIÓN PRINCIPAL DE SCROLL ---
+
+        function startScrolling() {
+            const container = document.getElementById('text-display-container');
+            const startButton = document.getElementById('start-pause-btn');
+
+            if (intervalId) {
+                // Pausar
+                clearInterval(intervalId);
+                intervalId = null;
+                startButton.textContent = 'Iniciar Lectura';
+                // Cambia de rojo (pausa) a marrón oscuro (inicio)
+                startButton.classList.replace('bg-red-700', 'bg-stone-700');
+                startButton.classList.replace('hover:bg-red-800', 'hover:bg-stone-800');
+                saveProgress();
+            } else {
+                // Si el texto ya terminó, no inicies
+                if (container.scrollTop + container.clientHeight >= container.scrollHeight - 1) {
+                     showMessage('Lectura Terminada', 'Reinicia la aplicación o carga un nuevo texto.');
+                     return;
+                }
+
+                // Iniciar
+                intervalId = setInterval(() => {
+                    const scrollDistance = calculateScrollDistance(); 
+                    container.scrollTop += scrollDistance;
+                    
+                    // Detener si llega al final del texto (con un margen de error de 1px)
+                    if (container.scrollTop + container.clientHeight >= container.scrollHeight - 1) {
+                        stopScrolling();
+                        showMessage('¡Lectura Finalizada!', '¡Excelente trabajo! Has completado el texto con una velocidad de ' + readingSpeedWPM + ' WPM.');
+                    }
+                }, FIXED_INTERVAL_MS); 
+
+                startButton.textContent = 'Pausar Lectura';
+                // Cambia de marrón oscuro (inicio) a rojo (pausa)
+                startButton.classList.replace('bg-stone-700', 'bg-red-700');
+                startButton.classList.replace('hover:bg-stone-800', 'hover:bg-red-800');
+            }
+        }
+        
+        function stopScrolling() {
+             if (intervalId) {
+                clearInterval(intervalId);
+                intervalId = null;
+                document.getElementById('start-pause-btn').textContent = 'Iniciar Lectura';
+                // Cambia de rojo (pausa) a marrón oscuro (inicio)
+                document.getElementById('start-pause-btn').classList.replace('bg-red-700', 'bg-stone-700');
+                document.getElementById('start-pause-btn').classList.replace('hover:bg-red-800', 'hover:bg-stone-800');
+                saveProgress();
+            }
+        }
+
+        // --- MANEJO DE ALMACENAMIENTO LOCAL (localStorage) ---
+
+        /**
+         * Guarda el progreso de la lectura en localStorage.
+         */
+        function saveProgress() {
+            const container = document.getElementById('text-display-container');
+            const textContent = document.getElementById('text-content').textContent;
+            
+            try {
+                if (textContent && textContent.trim().length > 0) {
+                    localStorage.setItem('speedReaderText', textContent);
+                    localStorage.setItem('speedReaderScrollPosition', container.scrollTop.toString());
+                    localStorage.setItem('speedReaderWPM', readingSpeedWPM.toString());
+                    document.getElementById('status-message').textContent = 'Progreso guardado automáticamente.';
+                }
+            } catch (e) {
+                console.error("No se pudo guardar el progreso en localStorage:", e);
+                document.getElementById('status-message').textContent = 'Error al guardar el progreso local.';
+            }
+        }
+
+        /**
+         * Carga el progreso guardado y actualiza la UI.
+         */
+        function loadProgress() {
+            const container = document.getElementById('text-display-container');
+            const textContentEl = document.getElementById('text-content');
+            const speedInput = document.getElementById('reading-speed-input');
+            const currentSpeedEl = document.getElementById('current-speed');
+            const loadTextarea = document.getElementById('text-input-area');
+
+            try {
+                const savedText = localStorage.getItem('speedReaderText');
+                const savedScrollPosition = localStorage.getItem('speedReaderScrollPosition');
+                const savedWPM = localStorage.getItem('speedReaderWPM');
+
+                if (savedText && savedText.trim().length > 0) {
+                    textContentEl.textContent = savedText;
+                    loadTextarea.value = savedText; // Sincroniza el área de texto
+                    document.getElementById('text-loader').classList.add('hidden');
+                    container.classList.remove('hidden');
+
+                    if (savedScrollPosition) {
+                        setTimeout(() => {
+                            container.scrollTop = parseInt(savedScrollPosition, 10);
+                            document.getElementById('status-message').textContent = 'Lectura reanudada desde el progreso guardado.';
+                        }, 100);
+                    }
+                } else {
+                     document.getElementById('status-message').textContent = 'Listo para cargar el texto.';
+                }
+
+                if (savedWPM) {
+                    readingSpeedWPM = parseInt(savedWPM, 10);
+                    speedInput.value = readingSpeedWPM;
+                    currentSpeedEl.textContent = readingSpeedWPM;
+                }
+            } catch (e) {
+                console.error("No se pudo cargar el progreso de localStorage:", e);
+                document.getElementById('status-message').textContent = 'Error al cargar el progreso local.';
+            }
+        }
+
+        // --- MANEJO DE CARGA DE PDF ---
+
+        /**
+         * Carga el archivo PDF, extrae su texto y lo pone en el área de texto.
+         * @param {File} file El archivo PDF.
+         */
+        async function loadPdfFile(file) {
+            showLoading(true, 'Cargando y extrayendo texto del PDF. Por favor, espere...');
+            const reader = new FileReader();
+            
+            reader.onload = async (e) => {
+                try {
+                    const arrayBuffer = e.target.result;
+                    const pdfDocument = await pdfjsLib.getDocument({ data: arrayBuffer }).promise;
+                    let fullText = '';
+                    
+                    for (let i = 1; i <= pdfDocument.numPages; i++) {
+                        const page = await pdfDocument.getPage(i);
+                        const textContent = await page.getTextContent();
+                        const pageText = textContent.items.map(item => item.str).join(' ');
+                        fullText += pageText + '\n\n--- Página ' + (i + 1) + ' ---\n\n';
+                    }
+
+                    document.getElementById('text-input-area').value = fullText.trim();
+                    loadText(); // Carga el texto extraído al lector
+                    showLoading(false);
+                    showMessage('PDF Cargado con Éxito', `Texto extraído de ${pdfDocument.numPages} páginas.`);
+
+                } catch (error) {
+                    showLoading(false);
+                    console.error("Error al procesar el PDF:", error);
+                    showMessage('Error al Cargar el PDF', 'No se pudo extraer el texto del PDF. Asegúrate de que el archivo no esté protegido o cifrado. Por favor, inténtalo copiando y pegando el contenido.');
+                }
+            };
+            
+            reader.onerror = () => {
+                showLoading(false);
+                showMessage('Error de Lectura', 'Error al leer el archivo.');
+            };
+
+            // Lee el archivo como ArrayBuffer, que es el formato que necesita PDF.js
+            reader.readAsArrayBuffer(file);
+        }
+
+
+        // --- MANEJO DE EVENTOS DE UI ---
+        
+        /**
+         * Actualiza la velocidad de lectura al mover el slider.
+         */
+        function handleSpeedChange(event) {
+            readingSpeedWPM = parseInt(event.target.value, 10);
+            document.getElementById('current-speed').textContent = readingSpeedWPM;
+            saveProgress(); 
+        }
+        
+        /**
+         * Carga el texto desde el textarea.
+         */
+        function loadText() {
+            stopScrolling();
+            const textInputArea = document.getElementById('text-input-area');
+            const textContentEl = document.getElementById('text-content');
+            const container = document.getElementById('text-display-container');
+            const textLoader = document.getElementById('text-loader');
+
+            const text = textInputArea.value.trim();
+
+            if (text.length === 0) {
+                showMessage('Error de Carga', 'Por favor, ingresa o pega el texto que deseas leer.');
+                return;
+            }
+
+            textContentEl.textContent = text;
+            
+            textLoader.classList.add('hidden');
+            container.classList.remove('hidden');
+
+            container.scrollTop = 0;
+            saveProgress();
+            
+            document.getElementById('status-message').textContent = 'Texto cargado. ¡Puedes iniciar la lectura!';
+        }
+
+        /**
+         * Maneja la carga de archivos.
+         */
+        function handleFileUpload(event) {
+            const file = event.target.files[0];
+            if (!file) return;
+            
+            // Determina si es PDF
+            const isPdf = file.name.endsWith('.pdf') || file.type === 'application/pdf';
+
+            // Comprueba formatos válidos
+            if (!isPdf && file.type !== 'text/plain' && !file.name.endsWith('.txt') && !file.name.endsWith('.md')) {
+                showMessage('Formato Inválido', 'Solo se admiten archivos de texto plano (.txt), Markdown (.md) o PDF.');
+                event.target.value = null; 
+                return;
+            }
+            
+            if (isPdf) {
+                loadPdfFile(file);
+            } else {
+                // Para TXT y MD, usamos el método simple readAsText
+                const reader = new FileReader();
+                reader.onload = (e) => {
+                    document.getElementById('text-input-area').value = e.target.result;
+                    loadText();
+                };
+                reader.readAsText(file);
+            }
+            
+            // Limpiar el input de archivo
+            event.target.value = null;
+        }
+
+        /**
+         * Muestra la interfaz de carga de texto y resetea la lectura.
+         */
+        function resetApp() {
+            stopScrolling();
+            document.getElementById('text-input-area').value = '';
+            document.getElementById('text-content').textContent = '';
+            document.getElementById('text-loader').classList.remove('hidden');
+            document.getElementById('text-display-container').classList.add('hidden');
+            document.getElementById('status-message').textContent = 'Aplicación reiniciada.';
+            // Limpiar localStorage para un borrado completo
+            localStorage.removeItem('speedReaderText');
+            localStorage.removeItem('speedReaderScrollPosition');
+            localStorage.removeItem('speedReaderWPM');
+        }
+
+        // --- INICIALIZACIÓN ---
+
+        document.addEventListener('DOMContentLoaded', () => {
+            // Asignar listeners
+            document.getElementById('start-pause-btn').addEventListener('click', startScrolling);
+            document.getElementById('load-text-btn').addEventListener('click', loadText);
+            document.getElementById('reset-btn').addEventListener('click', resetApp);
+            document.getElementById('reading-speed-input').addEventListener('input', handleSpeedChange);
+            document.getElementById('file-upload').addEventListener('change', handleFileUpload);
+            document.getElementById('modal-close-btn').addEventListener('click', () => {
+                document.getElementById('modal-overlay').classList.add('hidden');
+            });
+
+            // Cargar el progreso al inicio
+            loadProgress();
+
+            // Guardado automático del progreso al hacer scroll manual
+             document.getElementById('text-display-container').addEventListener('scroll', () => {
+                 if (!intervalId) {
+                     saveProgress();
+                 }
+             });
+        });
+    </script>
+</head>
+<body class="min-h-screen p-4 sm:p-8 font-sans">
+
+    <!-- Indicador de Carga (Overlay para PDF) -->
+    <div id="loading-overlay" class="fixed inset-0 hidden z-50 flex flex-col items-center justify-center bg-gray-900 bg-opacity-70">
+        <div class="spinner mb-4"></div>
+        <p id="loading-message" class="text-white text-lg font-semibold">Cargando PDF...</p>
+    </div>
+
+    <!-- Contenedor Principal (Tema Sepia) -->
+    <div class="max-w-4xl mx-auto sepia-container shadow-xl rounded-2xl p-6 md:p-10">
+        <h1 class="text-3xl font-extrabold text-red-800 mb-6 text-center">
+            Entrenador de Lectura Guiada
+        </h1>
+
+        <!-- Controles y Velocidad (Fondo Cremoso Claro) -->
+        <div class="bg-amber-100 p-4 rounded-xl mb-6 shadow-inner flex flex-col md:flex-row justify-between items-center space-y-4 md:space-y-0 md:space-x-4">
+            
+            <!-- Control de Velocidad -->
+            <div class="w-full md:w-1/3">
+                <label for="reading-speed-input" class="block text-sm font-medium text-red-800 mb-2">
+                    Velocidad (WPM - Palabras por Minuto):
+                    <span id="current-speed" class="text-lg font-bold ml-2">250</span>
+                </label>
+                <!-- Slider con color marrón oscuro -->
+                <input type="range" id="reading-speed-input" min="50" max="1000" step="50" value="250"
+                       oninput="document.getElementById('current-speed').textContent = this.value"
+                       class="w-full h-2 bg-amber-300 rounded-lg appearance-none cursor-pointer range-lg accent-red-800">
+                <div class="flex justify-between text-xs text-red-700 mt-1">
+                    <span>50 Lento</span>
+                    <span>1000 Rápido</span>
+                </div>
+            </div>
+
+            <!-- Botones de Control -->
+            <div class="w-full md:w-2/3 flex space-x-3 justify-end">
+                <button id="start-pause-btn" 
+                        class="px-6 py-3 bg-stone-700 text-white font-semibold rounded-lg shadow-md hover:bg-stone-800 transition duration-300 transform hover:scale-105">
+                    Iniciar Lectura
+                </button>
+                <button id="reset-btn" 
+                        class="px-4 py-3 bg-stone-500 text-white font-semibold rounded-lg shadow-md hover:bg-stone-600 transition duration-300">
+                    Reiniciar App
+                </button>
+            </div>
+        </div>
+        
+        <!-- Mensaje de Estado -->
+        <p id="status-message" class="text-center text-sm mb-4 text-stone-600"></p>
+
+        <!-- 1. Área de Carga de Texto -->
+        <div id="text-loader" class="space-y-4 p-6 border-2 border-dashed border-stone-400 rounded-xl bg-amber-50 shadow-md">
+            <h2 class="text-xl font-semibold text-red-700">Cargar o Pegar Texto</h2>
+            <p class="text-sm text-stone-600">
+                Pega aquí el texto de tu documento o sube un archivo **(.txt, .md, o .pdf)**.
+            </p>
+            <textarea id="text-input-area" rows="8" placeholder="Pega aquí el contenido de tu documento..."
+                      class="w-full p-3 border border-stone-400 rounded-lg focus:ring-red-700 focus:border-red-700 transition duration-150 bg-white text-gray-900"></textarea>
+            
+            <div class="flex space-x-4 items-center">
+                <button id="load-text-btn" 
+                        class="px-6 py-2 bg-red-700 text-white font-semibold rounded-lg shadow-md hover:bg-red-800 transition duration-300 transform hover:scale-105">
+                    Cargar Texto en Lector
+                </button>
+                <!-- Acepta TXT, MD y PDF -->
+                <input type="file" id="file-upload" accept=".txt,.md,.pdf" class="text-sm text-stone-600 file:mr-4 file:py-2 file:px-4
+                  file:rounded-full file:border-0
+                  file:text-sm file:font-semibold
+                  file:bg-stone-300 file:text-red-800
+                  hover:file:bg-stone-400 cursor-pointer"/>
+            </div>
+        </div>
+
+        <!-- 2. Área de Lectura -->
+        <!-- Contenedor con barra de scroll manual y línea guía fija -->
+        <div id="text-display-container" class="hidden rounded-lg shadow-lg relative text-base overflow-y-scroll">
+            
+            <!-- Línea de Apoyo de Lectura (Regla Fija) -->
+            <div id="reading-guide-line"></div>
+            
+            <!-- Contenido del Texto -->
+            <pre id="text-content" class="whitespace-pre-wrap font-serif"></pre>
+        </div>
+
+        <p class="text-xs text-center text-stone-500 mt-4">
+            Nota: La línea roja está fija; el texto se desliza por debajo para mantener tu enfoque.
+        </p>
+
+    </div>
+
+    <!-- Modal Personalizado para Mensajes (Reemplaza alert) -->
+    <div id="modal-overlay" class="fixed inset-0 hidden z-50 flex items-center justify-center p-4" onclick="document.getElementById('modal-overlay').classList.add('hidden')">
+        <div class="rounded-xl shadow-2xl p-6 max-w-sm w-full transform transition-all duration-300" onclick="event.stopPropagation()">
+            <h3 id="modal-title" class="text-xl font-bold text-red-700 mb-3">Mensaje</h3>
+            <p id="modal-text" class="mb-6"></p>
+            <div class="flex justify-end">
+                <button id="modal-close-btn" class="px-4 py-2 bg-red-700 text-white rounded-lg hover:bg-red-800 transition">
+                    Cerrar
+                </button>
+            </div>
+        </div>
+    </div>
+
+</body>
+</html>
